@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+outputs/
+tmp/
+models/**/*.pt
+models/**/*.pth
+*.pt
+*.pth
+*.ts
+third_party/
+.ultralytics/
+Ultralytics/
