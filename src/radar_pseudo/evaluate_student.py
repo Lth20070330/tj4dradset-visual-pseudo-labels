@@ -19,6 +19,13 @@ from .student import (
     load_label_file,
     object_to_radar_parameters,
 )
+from .dataset import KittiObject
+from .geometry import radar_to_rectified_camera
+from .metrics3d import ScoredObject, bev_iou, evaluate_ranked_detections, iou_3d
+
+
+PRIMARY_CLASSES = ("Car", "Truck", "Pedestrian", "Cyclist")
+STANDARD_IOU = {"Car": 0.5, "Truck": 0.5, "Pedestrian": 0.25, "Cyclist": 0.25}
 
 
 def average_precision(recall: np.ndarray, precision: np.ndarray) -> float:
@@ -36,7 +43,7 @@ def evaluate_at_distance(
     distance_threshold: float,
 ) -> dict[str, object]:
     per_class = {}
-    for category in CLASSES:
+    for category in PRIMARY_CLASSES:
         gt_by_frame = {frame: [center for name, center in objects if name == category] for frame, objects in ground_truth.items()}
         total_gt = sum(len(centers) for centers in gt_by_frame.values())
         ranked = sorted(
@@ -71,6 +78,68 @@ def evaluate_at_distance(
     return {"mAP": float(np.mean(valid_aps)), "per_class": per_class}
 
 
+def detection_to_kitti(prediction: DetectionBEV, calibration) -> KittiObject:
+    center_camera = radar_to_rectified_camera(prediction.center_xyz[None, :], calibration)[0]
+    direction_radar = np.array([np.cos(prediction.yaw), np.sin(prediction.yaw), 0.0], dtype=np.float64)
+    direction_camera = (
+        radar_to_rectified_camera((prediction.center_xyz + direction_radar)[None, :], calibration)[0]
+        - center_camera
+    )
+    rotation_y = float(np.arctan2(-direction_camera[2], direction_camera[0]))
+    length, width, height = prediction.dimensions_lwh
+    return KittiObject(
+        category=prediction.category,
+        truncated=0,
+        occluded=0,
+        alpha=0.0,
+        bbox_2d=np.zeros(4, dtype=np.float64),
+        dimensions_hwl=np.array([height, width, length], dtype=np.float64),
+        location_camera=center_camera,
+        rotation_y=rotation_y,
+    )
+
+
+def evaluate_standard_3d(
+    predictions: dict[str, list[DetectionBEV]],
+    ground_truth: dict[str, list[KittiObject]],
+    calibrations: dict[str, object],
+    maximum_range: float = 70.0,
+) -> dict[str, object]:
+    per_class: dict[str, object] = {}
+    for category in PRIMARY_CLASSES:
+        category_predictions: list[ScoredObject] = []
+        category_ground_truth: dict[str, list[KittiObject]] = {}
+        for frame_id, objects in ground_truth.items():
+            calibration = calibrations[frame_id]
+            category_ground_truth[frame_id] = [
+                obj for obj in objects
+                if obj.category == category
+                and np.linalg.norm(object_to_radar_parameters(obj, calibration)[0][:2]) <= maximum_range
+            ]
+            for prediction in predictions.get(frame_id, []):
+                if prediction.category != category or np.linalg.norm(prediction.center_xyz[:2]) > maximum_range:
+                    continue
+                category_predictions.append(
+                    ScoredObject(frame_id, detection_to_kitti(prediction, calibration), prediction.score)
+                )
+        threshold = STANDARD_IOU[category]
+        per_class[category] = {
+            "iou_threshold": threshold,
+            "bev": evaluate_ranked_detections(
+                category_predictions, category_ground_truth, threshold, bev_iou
+            ),
+            "3d": evaluate_ranked_detections(
+                category_predictions, category_ground_truth, threshold, iou_3d
+            ),
+        }
+    return {
+        "maximum_range_m": maximum_range,
+        "mAP_BEV_R40": float(np.mean([per_class[name]["bev"]["ap_r40"] for name in PRIMARY_CLASSES])),
+        "mAP_3D_R40": float(np.mean([per_class[name]["3d"]["ap_r40"] for name in PRIMARY_CLASSES])),
+        "per_class": per_class,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate a radar student on official GT validation labels")
     parser.add_argument("--dataset-root", required=True)
@@ -96,15 +165,20 @@ def main() -> None:
             decoded = decode_detections(outputs, score_threshold=args.score_threshold)
             predictions.update(zip(batch["frame_id"], decoded, strict=True))
     ground_truth = {}
+    ground_truth_objects = {}
+    calibrations = {}
     for frame_id in frame_ids:
         calibration = dataset.dataset.load_calibration(frame_id)
+        calibrations[frame_id] = calibration
         objects = load_label_file(dataset.dataset.label_dir / f"{frame_id}.txt")
+        ground_truth_objects[frame_id] = objects
         ground_truth[frame_id] = [(obj.category, object_to_radar_parameters(obj, calibration)[0]) for obj in objects if obj.category in CLASSES]
     result = {
         "checkpoint": args.checkpoint,
         "frames": len(frame_ids),
         "distance_2m": evaluate_at_distance(predictions, ground_truth, 2.0),
         "distance_4m": evaluate_at_distance(predictions, ground_truth, 4.0),
+        "standard_70m": evaluate_standard_3d(predictions, ground_truth_objects, calibrations),
     }
     output = Path(args.output); output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")

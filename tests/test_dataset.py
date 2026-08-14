@@ -14,7 +14,10 @@ from radar_pseudo.pseudo_label import backproject_pixel, densest_depth_cluster
 from radar_pseudo.evaluate_teacher import box_iou_2d
 from radar_pseudo.batch_generate import to_kitti_line
 from radar_pseudo.pseudo_label import PseudoBox3D
-from radar_pseudo.student import BEVConfig, RadarBEVDetector, radar_to_bev
+from radar_pseudo.student import BEVConfig, RadarBEVDetector, RadarDetectionDataset, radar_to_bev
+from radar_pseudo.metrics3d import ap_r40, bev_iou, iou_3d
+from radar_pseudo.dataset import KittiObject
+from radar_pseudo.filter_pseudo_labels import joint_center_score
 
 
 SAMPLE_ROOT = os.environ.get("TJ4DRADSET_SAMPLE", r"C:\Users\lth\TJ4DRadSet\Sample")
@@ -89,6 +92,36 @@ class TJ4DRadSetSampleTests(unittest.TestCase):
         output = model(torch.from_numpy(features[None]))
         self.assertEqual(output["heatmap"].shape, (1, 5, config.height, config.width))
         self.assertEqual(output["regression"].shape, (1, 8, config.height, config.width))
+        training_sample = RadarDetectionDataset(SAMPLE_ROOT, ["070070"])[0]
+        self.assertEqual(training_sample["weight"].shape, (8, config.height, config.width))
+        self.assertEqual(training_sample["positive_weight"].shape, (5, config.height, config.width))
+        self.assertEqual(training_sample["classification_weight"].shape, (1, config.height, config.width))
+
+    def test_oriented_box_iou_metrics(self):
+        first = KittiObject(
+            "Car", 0, 0, 0.0, np.zeros(4), np.array([2.0, 2.0, 4.0]), np.array([0.0, 1.0, 20.0]), 0.0
+        )
+        identical = KittiObject(
+            "Car", 0, 0, 0.0, np.zeros(4), np.array([2.0, 2.0, 4.0]), np.array([0.0, 1.0, 20.0]), 0.0
+        )
+        disjoint = KittiObject(
+            "Car", 0, 0, 0.0, np.zeros(4), np.array([2.0, 2.0, 4.0]), np.array([20.0, 1.0, 20.0]), 0.0
+        )
+        rotated = KittiObject(
+            "Car", 0, 0, 0.0, np.zeros(4), np.array([2.0, 2.0, 4.0]), np.array([0.0, 1.0, 20.0]), np.pi / 2
+        )
+        self.assertAlmostEqual(bev_iou(first, identical), 1.0)
+        self.assertAlmostEqual(iou_3d(first, identical), 1.0)
+        self.assertEqual(bev_iou(first, disjoint), 0.0)
+        self.assertAlmostEqual(bev_iou(first, rotated), 1.0 / 3.0)
+
+    def test_ap_r40_perfect_ranking(self):
+        recall = np.array([0.5, 1.0])
+        precision = np.array([1.0, 1.0])
+        self.assertEqual(ap_r40(recall, precision), 1.0)
+
+    def test_joint_center_score_is_geometric_mean(self):
+        self.assertAlmostEqual(joint_center_score({"class_quality": 0.81, "center_quality": 0.49}), 0.63)
 
 
 if __name__ == "__main__":

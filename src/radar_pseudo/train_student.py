@@ -24,6 +24,7 @@ def main() -> None:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--label-dir")
     parser.add_argument("--metadata-dir")
+    parser.add_argument("--ignore-label-dir", help="KITTI labels to mask from the classification-negative loss")
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--workers", type=int, default=2)
@@ -34,7 +35,7 @@ def main() -> None:
     seed_everything(args.seed)
     frame_ids = [line.strip() for line in Path(args.split_file).read_text(encoding="utf-8").splitlines() if line.strip()]
     if args.max_frames: frame_ids = frame_ids[:args.max_frames]
-    dataset = RadarDetectionDataset(args.dataset_root, frame_ids, args.label_dir, args.metadata_dir)
+    dataset = RadarDetectionDataset(args.dataset_root, frame_ids, args.label_dir, args.metadata_dir, args.ignore_label_dir)
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.workers, pin_memory=True, persistent_workers=args.workers > 0)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model = RadarBEVDetector().to(device)
@@ -46,7 +47,7 @@ def main() -> None:
         model.train(); running = 0.0; parts = {"heatmap": 0.0, "regression": 0.0}
         progress = tqdm(loader, desc=f"epoch {epoch}/{args.epochs}")
         for batch in progress:
-            for key in ("features", "heatmap", "regression", "weight"):
+            for key in ("features", "heatmap", "regression", "weight", "positive_weight", "classification_weight"):
                 batch[key] = batch[key].to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
             loss, loss_parts = detection_loss(model(batch["features"]), batch)

@@ -9,7 +9,7 @@ import tempfile
 from tqdm import tqdm
 
 from .dataset import TJ4DRadSet
-from .pseudo_label import PseudoBox3D, estimate_pseudo_box
+from .pseudo_label import PseudoBox3D, estimate_pseudo_box_by_method
 from .vision import DepthAnythingMetric, YoloSegmenter
 
 
@@ -45,13 +45,14 @@ def generate_frame(
     depth_model: DepthAnythingMetric,
     confidence: float,
     quality_threshold: float,
+    method: str = "b0",
 ) -> list[PseudoBox3D]:
     image = dataset.load_image(frame_id)
     calibration = dataset.load_calibration(frame_id)
     radar = dataset.load_radar(frame_id)
     instances = segmenter.predict(image, confidence=confidence)
     depth = depth_model.predict(image)
-    boxes = [estimate_pseudo_box(instance, depth, radar, calibration) for instance in instances]
+    boxes = [estimate_pseudo_box_by_method(method, instance, depth, radar, calibration) for instance in instances]
     return [box for box in boxes if box.quality >= quality_threshold]
 
 
@@ -61,6 +62,7 @@ def main() -> None:
     parser.add_argument("--split-file", required=True)
     parser.add_argument("--output-root", required=True)
     parser.add_argument("--quality-threshold", type=float, default=0.6)
+    parser.add_argument("--method", choices=("b0", "mgu", "mgu_pca"), default="b0")
     parser.add_argument("--confidence", type=float, default=0.05)
     parser.add_argument("--image-size", type=int, default=1280)
     parser.add_argument("--max-frames", type=int)
@@ -89,7 +91,7 @@ def main() -> None:
     failures = []
     for frame_id in tqdm(pending, desc="pseudo-label generation"):
         try:
-            boxes = generate_frame(dataset, frame_id, segmenter, depth_model, args.confidence, args.quality_threshold)
+            boxes = generate_frame(dataset, frame_id, segmenter, depth_model, args.confidence, args.quality_threshold, args.method)
             atomic_write_text(label_dir / f"{frame_id}.txt", "\n".join(to_kitti_line(box) for box in boxes))
             atomic_write_text(metadata_dir / f"{frame_id}.json", json.dumps([box.to_dict() for box in boxes], ensure_ascii=False, indent=2))
         except Exception as error:
@@ -100,6 +102,7 @@ def main() -> None:
         "split_file": args.split_file,
         "frames": len(frame_ids),
         "quality_threshold": args.quality_threshold,
+        "method": args.method,
         "confidence": args.confidence,
         "image_size": args.image_size,
         "segmenter": args.segmenter,
